@@ -1,23 +1,22 @@
 # zig-leduc-cfr
 
-A tiny, self-contained poker AI in Zig.
+A tiny, self-contained poker AI in Zig — built for learning.
 
-It plays **Leduc Hold'em**, a toy poker game with a 6-card deck (J,Q,K, two copies each), two betting rounds, fixed bets, and a single public card. We solve it with **Counterfactual Regret Minimization (CFR)**.
+This project solves **Leduc Hold'em** using **Counterfactual Regret Minimization (CFR)**, a foundational algorithm for computing Nash equilibria in imperfect-information games. The codebase is intentionally small (~500 lines) and heavily commented to serve as a teaching resource.
 
 ---
 
-## Build & run
+## Quick Start
 
-Requires Zig 0.15.1 (available via `./bin/zig`).
+Requires Zig 0.15+ (available via `./bin/zig`).
 
 ```bash
-# Optimized build (recommended)
 ./bin/zig build run -Doptimize=ReleaseFast
 ```
 
 Example output:
 
-```text
+```
 Leduc CFR trainer (toy, educational) - Vanilla
 Sweeping iteration counts: { 100, 300, 1000, 3000, 10000, 30000, 100000 }
 
@@ -33,78 +32,122 @@ Iter       AvgGame    AasP0     BaseAsP0  Exploit
    100000  -0.08597   -0.08583   -0.08583  0.00142
 ```
 
-**Columns:**
-- **Iter**: CFR iterations for this strategy
-- **AvgGame**: Self-play expected value for player 0 (converges to ~-0.086, the Nash value)
-- **AasP0**: Strategy's EV as player 0 vs the 100K-iteration base
-- **BaseAsP0**: Base strategy's EV as player 0 vs this strategy
-- **Exploit**: Best-response exploitability (NashConv/2) - approaches 0 as strategy converges to Nash
-
-The 100K-iteration strategy has exploitability of 0.00142, meaning a perfect best-responder gains less than 0.2 cents per hand - essentially Nash equilibrium.
+The 100K-iteration strategy has exploitability of 0.00142 — a perfect opponent gains less than 0.15 cents per hand. That's essentially Nash equilibrium.
 
 ---
 
-## How it works
+## What You'll Learn
 
-### CFR overview
+This codebase teaches the core concepts of game-solving AI:
 
-CFR iteratively improves a strategy by tracking **regret** - how much better each action would have been compared to what was actually played. Actions with positive regret get played more often; actions with negative regret get avoided.
+1. **Information Sets** — How to represent "what a player knows" when they can't see opponent's cards
+2. **Regret Matching** — How to convert regrets into a strategy that improves over time  
+3. **Counterfactual Value** — Why we weight updates by opponent reach probability
+4. **Average Strategy** — Why the time-averaged strategy converges to Nash, not the current strategy
+5. **Best Response** — How to compute exploitability using policy iteration
 
-Over many iterations, the **average strategy** converges to a Nash equilibrium where neither player can improve by changing their strategy.
+---
 
-### Code structure
+## Code Structure
 
 ```
 src/leduc/
-  game.zig         # Game state, actions, terminal utilities
-  cfr.zig          # Shared infoset helpers used by the trainer
-  cfr_vanilla.zig  # CFR trainer with regret matching (full-tree)
-  play.zig         # Head-to-head evaluation, best-response exploitability
+  game.zig         # Game rules, state transitions, payoffs
+  cfr.zig          # Information sets and regret matching
+  cfr_vanilla.zig  # Full-tree CFR (traverse everything)
+  cfr_mccfr.zig    # Monte Carlo CFR (sample opponent actions)
+  play.zig         # Evaluation: head-to-head and exploitability
 main.zig           # CLI entry point
 ```
 
-If you want to learn CFR, the intended reading order is:
+### Reading Order
 
-1. **game.zig** - How a Leduc hand is represented (cards, pot, betting history)
-2. **cfr_vanilla.zig** - The CFR algorithm: tree traversal, regret updates, strategy averaging
-3. **play.zig** - Evaluation: head-to-head play and exploitability via best-response
+If you're learning CFR, read the files in this order:
 
-### Exploitability
+1. **game.zig** — Understand Leduc Hold'em: cards, betting rounds, how hands are scored. This is pure game logic with no CFR concepts.
 
-Exploitability measures how far a strategy is from Nash equilibrium. It's computed as:
+2. **cfr.zig** — Learn about information sets and regret matching. An info set groups game states that look identical to a player. Regret matching converts cumulative regrets into action probabilities.
 
-```
-exploitability = (BR_0_EV + BR_1_EV) / 2
-```
+3. **cfr_vanilla.zig** — The core CFR algorithm. We traverse the entire game tree, computing counterfactual values and updating regrets. Pay attention to *why* we weight by opponent reach (regret) vs own reach (strategy averaging).
 
-Where `BR_i_EV` is the expected value of player i's **best response** against the opponent's strategy. Against a perfect Nash equilibrium, no best response can do better than the equilibrium value, so exploitability = 0.
+4. **cfr_mccfr.zig** — Monte Carlo CFR. Same algorithm, but we sample opponent actions instead of enumerating them. Compare this to vanilla CFR to see exactly what changes.
 
-The best-response calculation uses policy iteration to correctly handle information sets (the BR player can't peek at opponent's cards).
+5. **play.zig** — How to evaluate strategies. Head-to-head is straightforward; best-response exploitability uses policy iteration because the best responder can't peek at opponent's cards.
 
 ---
 
-## Leduc Hold'em rules
+## How CFR Works
 
-- **Deck**: 6 cards (J, Q, K with 2 copies each)
-- **Players**: 2
-- **Ante**: 1 chip each
-- **Rounds**: 2 betting rounds (preflop, then flop after board card is revealed)
-- **Bet sizes**: Fixed-limit (2 chips preflop, 4 chips on flop)
-- **Betting**: Check/bet or call/raise/fold; max 2 bets per round
-- **Showdown**: Pair with board wins; otherwise high card; ties split
+CFR finds Nash equilibria by tracking **regret** — how much better each action would have been compared to what we actually played.
 
-The game has ~936 game states and ~288 information sets, making it small enough to solve exactly.
+```
+regret[action] += (value_if_always_played_action) - (value_of_current_strategy)
+```
+
+Then we convert regrets to a strategy via **regret matching**:
+- Positive regret → play this action more
+- Negative regret → avoid this action
+- All non-positive → play uniformly
+
+The **average strategy** (not the current strategy!) converges to Nash equilibrium. That's why we track `cumulative_strategy` weighted by reach probability.
+
+### Why "Counterfactual"?
+
+The regret update asks: "If I had *always* played action A at this decision point, how much better would I have done?" This is counterfactual because we're imagining a different history.
+
+We weight by **opponent reach** because that's how often this decision point matters. Our own probability of reaching here doesn't affect the counterfactual — we're asking what happens if we deviate.
+
+---
+
+## Leduc Hold'em Rules
+
+Leduc is a toy poker game, small enough to solve exactly:
+
+| Property | Value |
+|----------|-------|
+| Deck | 6 cards: J, Q, K × 2 suits |
+| Players | 2 |
+| Ante | 1 chip each |
+| Rounds | Preflop → Flop (after board revealed) |
+| Bet sizes | 2 chips (preflop), 4 chips (flop) |
+| Max bets/round | 2 (bet + raise) |
+| Hand ranking | Pair with board > high card |
+
+The game has ~936 game states and ~288 information sets.
+
+---
+
+## Vanilla CFR vs MCCFR
+
+Run MCCFR with:
+
+```bash
+./bin/zig build run -Doptimize=ReleaseFast -- --algo=mccfr
+```
+
+**Vanilla CFR**: Traverses the entire game tree every iteration. Low variance, high cost per iteration. Ideal for small games.
+
+**MCCFR**: Samples opponent actions from their current strategy. Higher variance, but much faster per iteration. Scales to larger games.
+
+For Leduc, vanilla CFR converges faster in wall-clock time. For Texas Hold'em, you'd need MCCFR (or better variants like CFR+, DCFR).
+
+---
+
+## Output Columns
+
+| Column | Meaning |
+|--------|---------|
+| Iter | CFR iterations for this strategy |
+| AvgGame | Self-play expected value for P0 (converges to ~-0.086) |
+| AasP0 | This strategy's EV as P0 vs the 100K base |
+| BaseAsP0 | Base strategy's EV as P0 vs this strategy |
+| Exploit | Best-response exploitability (0 = Nash) |
 
 ---
 
 ## Papers
 
-- [An Introduction to Counterfactual Regret Minimization](https://modelai.gettysburg.edu/2013/cfr/cfr.pdf) - Neller & Lanctot tutorial
-
-- [Regret Minimization in Games with Incomplete Information](https://poker.cs.ualberta.ca/publications/NIPS07-cfr.pdf) - Zinkevich et al., NIPS 2007.
-
-- [Monte Carlo Sampling for Regret Minimization in Extensive Games](https://mlanctot.info/files/papers/nips09mccfr_techreport.pdf) - Lanctot et al., NIPS 2009.
-
-- [Efficient Nash Equilibrium Approximation through Monte Carlo CFR](http://johanson.ca/publications/poker/2012-aamas-pcs/2012-aamas-pcs.pdf) - Johanson et al., AAMAS
-
-- [Accelerating Best Response Calculation in Large Extensive Games](http://www.cs.cmu.edu/~kwaugh/publications/johanson11.pdf) - Johanson et al., IJCAI 2011.
+- [An Introduction to Counterfactual Regret Minimization](https://modelai.gettysburg.edu/2013/cfr/cfr.pdf) — Neller & Lanctot tutorial (start here!)
+- [Regret Minimization in Games with Incomplete Information](https://poker.cs.ualberta.ca/publications/NIPS07-cfr.pdf) — Zinkevich et al., NIPS 2007 (original CFR)
+- [Monte Carlo Sampling for Regret Minimization](https://mlanctot.info/files/papers/nips09mccfr_techreport.pdf) — Lanctot et al., NIPS 2009 (MCCFR)
+- [Accelerating Best Response Calculation](http://www.cs.cmu.edu/~kwaugh/publications/johanson11.pdf) — Johanson et al., IJCAI 2011

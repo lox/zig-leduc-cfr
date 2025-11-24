@@ -1,5 +1,6 @@
 const std = @import("std");
 const vanilla = @import("src/leduc/cfr_vanilla.zig");
+const mccfr = @import("src/leduc/cfr_mccfr.zig");
 const play = @import("src/leduc/play.zig");
 
 const DEFAULT_SWEEP: []const usize = &.{
@@ -44,5 +45,23 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    try runSweep(vanilla.VanillaCFRTrainer, allocator, DEFAULT_SWEEP, "Vanilla");
+    var algo: enum { vanilla, mccfr } = .vanilla;
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.next(); // skip argv[0]
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--algo=vanilla")) {
+            algo = .vanilla;
+        } else if (std.mem.eql(u8, arg, "--algo=mccfr")) {
+            algo = .mccfr;
+        } else {
+            std.debug.print("Unknown argument: {s}\n", .{arg});
+            return error.InvalidArgument;
+        }
+    }
+
+    switch (algo) {
+        .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, DEFAULT_SWEEP, "Vanilla"),
+        .mccfr => try runSweep(mccfr.MCCFRTrainer, allocator, DEFAULT_SWEEP, "MCCFR"),
+    }
 }

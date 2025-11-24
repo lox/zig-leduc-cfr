@@ -1,28 +1,55 @@
+// game.zig — Leduc Hold'em Game Logic
+// ====================================
+//
+// This file defines the rules of Leduc Hold'em, a tiny poker game used to
+// study game-theoretic concepts. It's small enough to solve exactly, yet
+// captures the essential structure of poker: private information, betting,
+// and bluffing.
+//
+// Leduc rules:
+//   - 6-card deck: J, Q, K with 2 suits each
+//   - 2 players, 1 chip ante each
+//   - 2 betting rounds: preflop (hidden cards only), flop (after board revealed)
+//   - Fixed-limit betting: 2 chips preflop, 4 chips on flop
+//   - Max 2 bets per round (bet + raise, or check-raise)
+//   - Showdown: pair with board beats high card; high card wins ties
+//
+// The game tree has ~936 states and ~288 information sets.
+
 const std = @import("std");
 
-// Core game definitions shared by all trainers/evaluators.
+// =============================================================================
+// Constants
+// =============================================================================
 
 pub const NUM_PLAYERS = 2;
-pub const NUM_RANKS = 3; // J, Q, K
-pub const NUM_SUITS = 2; // two copies of each rank
-pub const DECK_SIZE = NUM_RANKS * NUM_SUITS;
-pub const TOTAL_DEALS = DECK_SIZE * (DECK_SIZE - 1) * (DECK_SIZE - 2); // ordered (p0, p1, board)
+pub const NUM_RANKS = 3; // J=0, Q=1, K=2
+pub const NUM_SUITS = 2; // Two copies of each rank
+pub const DECK_SIZE = NUM_RANKS * NUM_SUITS; // 6 cards total
 
-pub const MAX_ACTIONS: usize = 3; // never need more than 3 at a node
-pub const MAX_STREET_HISTORY: usize = 8; // tiny per-street buffer
-pub const MAX_BETS_PER_ROUND: u8 = 2; // bet + (at most) one raise
-pub const ANTE_SIZE: i32 = 1;
-pub const BetSizes = [_]i32{ 2, 4 }; // fixed-limit bet sizes per round
-pub const INVALID_CARD: u8 = 255;
+pub const MAX_ACTIONS: usize = 3; // At most: fold, call, raise (or check, bet)
+pub const MAX_BETS_PER_ROUND: u8 = 2; // bet + one raise maximum
+pub const MAX_HISTORY_LEN: usize = 8; // Actions per street (plenty of room)
 
-pub const Round = enum(u8) { preflop = 0, flop = 1, showdown = 2 };
-pub const Action = enum { check, call, bet, raise, fold };
+pub const ANTE: i32 = 1;
+pub const BET_SIZES = [_]i32{ 2, 4 }; // Preflop=2, flop=4
 
-pub fn rank(card: u8) u8 {
-    return card / @as(u8, NUM_SUITS); // 0,1 -> J; 2,3 -> Q; 4,5 -> K
+// Total possible deals: 6 choices for P0 × 5 for P1 × 4 for board = 120
+pub const TOTAL_DEALS = DECK_SIZE * (DECK_SIZE - 1) * (DECK_SIZE - 2);
+
+// =============================================================================
+// Cards
+// =============================================================================
+
+pub const Card = u8;
+pub const NO_CARD: Card = 255;
+
+/// Extract rank from card. Cards 0,1 are Jacks; 2,3 are Queens; 4,5 are Kings.
+pub fn cardRank(card: Card) u8 {
+    return card / NUM_SUITS;
 }
 
-pub fn rankChar(r: u8) u8 {
+pub fn rankToChar(r: u8) u8 {
     return switch (r) {
         0 => 'J',
         1 => 'Q',
@@ -31,233 +58,333 @@ pub fn rankChar(r: u8) u8 {
     };
 }
 
-pub fn actionChar(a: Action) u8 {
-    return switch (a) {
-        .check => 'k',
-        .call => 'c',
-        .bet => 'b',
-        .raise => 'r',
-        .fold => 'f',
-    };
-}
+// =============================================================================
+// Actions
+// =============================================================================
+
+pub const Action = enum {
+    check,
+    bet,
+    call,
+    raise,
+    fold,
+
+    pub fn toChar(self: Action) u8 {
+        return switch (self) {
+            .check => 'k',
+            .bet => 'b',
+            .call => 'c',
+            .raise => 'r',
+            .fold => 'f',
+        };
+    }
+};
+
+// =============================================================================
+// Betting Round
+// =============================================================================
+
+pub const Round = enum(u8) {
+    preflop = 0,
+    flop = 1,
+    showdown = 2,
+
+    pub fn betSize(self: Round) i32 {
+        return BET_SIZES[@intFromEnum(self)];
+    }
+};
+
+// =============================================================================
+// Game State
+// =============================================================================
 
 pub const GameState = struct {
-    private_cards: [NUM_PLAYERS]u8,
-    public_card: ?u8,
-    community_card: u8,
+    // Cards
+    hole_cards: [NUM_PLAYERS]Card, // Each player's private card
+    board_card: Card, // The community card (revealed on flop)
+    board_revealed: bool, // Has the board been shown?
+
+    // Betting state
     round: Round,
     current_player: u8,
-    contrib: [NUM_PLAYERS]i32,
-    bets_in_round: u8,
-    actions_in_round: u8,
-    preflop_history: [MAX_STREET_HISTORY]u8,
+    pot: [NUM_PLAYERS]i32, // How much each player has contributed
+    bets_this_round: u8, // Number of bets/raises so far this round
+    actions_this_round: u8, // Total actions this round (for round-ending logic)
+
+    // Action history (for information set keys)
+    preflop_history: [MAX_HISTORY_LEN]u8,
     preflop_len: u8,
-    flop_history: [MAX_STREET_HISTORY]u8,
+    flop_history: [MAX_HISTORY_LEN]u8,
     flop_len: u8,
+
+    // Terminal state
     folded_player: ?u8,
 
+    /// Create the initial state for a new hand.
+    /// Cards must be set separately via deal().
     pub fn init() GameState {
-        return GameState{
-            .private_cards = [_]u8{ INVALID_CARD, INVALID_CARD },
-            .public_card = null,
-            .community_card = INVALID_CARD,
+        return .{
+            .hole_cards = .{ NO_CARD, NO_CARD },
+            .board_card = NO_CARD,
+            .board_revealed = false,
             .round = .preflop,
             .current_player = 0,
-            .contrib = [_]i32{ ANTE_SIZE, ANTE_SIZE },
-            .bets_in_round = 0,
-            .actions_in_round = 0,
-            .preflop_history = std.mem.zeroes([MAX_STREET_HISTORY]u8),
+            .pot = .{ ANTE, ANTE },
+            .bets_this_round = 0,
+            .actions_this_round = 0,
+            .preflop_history = std.mem.zeroes([MAX_HISTORY_LEN]u8),
             .preflop_len = 0,
-            .flop_history = std.mem.zeroes([MAX_STREET_HISTORY]u8),
+            .flop_history = std.mem.zeroes([MAX_HISTORY_LEN]u8),
             .flop_len = 0,
             .folded_player = null,
         };
     }
 
-    pub fn appendAction(self: *GameState, c: u8) void {
+    /// Deal cards to create a complete starting state.
+    pub fn deal(p0_card: Card, p1_card: Card, board: Card) GameState {
+        var state = init();
+        state.hole_cards[0] = p0_card;
+        state.hole_cards[1] = p1_card;
+        state.board_card = board;
+        return state;
+    }
+
+    // -------------------------------------------------------------------------
+    // Queries
+    // -------------------------------------------------------------------------
+
+    pub fn isTerminal(self: *const GameState) bool {
+        return self.folded_player != null or self.round == .showdown;
+    }
+
+    pub fn amountToCall(self: *const GameState) i32 {
+        const player = self.current_player;
+        const opponent: usize = 1 - @as(usize, player);
+        return self.pot[opponent] - self.pot[player];
+    }
+
+    pub fn canBetOrRaise(self: *const GameState) bool {
+        return self.bets_this_round < MAX_BETS_PER_ROUND;
+    }
+
+    /// Get the legal actions from this state.
+    /// Returns the number of actions written to the output buffer.
+    pub fn legalActions(self: *const GameState, out: *[MAX_ACTIONS]Action) usize {
+        const to_call = self.amountToCall();
+        std.debug.assert(to_call >= 0);
+
+        var n: usize = 0;
+
+        if (to_call == 0) {
+            // No bet to face: can check or bet
+            out[n] = .check;
+            n += 1;
+            if (self.canBetOrRaise()) {
+                out[n] = .bet;
+                n += 1;
+            }
+        } else {
+            // Facing a bet: can call, raise, or fold
+            out[n] = .call;
+            n += 1;
+            if (self.canBetOrRaise()) {
+                out[n] = .raise;
+                n += 1;
+            }
+            out[n] = .fold;
+            n += 1;
+        }
+        return n;
+    }
+
+    // -------------------------------------------------------------------------
+    // State Transitions
+    // -------------------------------------------------------------------------
+
+    /// Apply an action and return the resulting state.
+    pub fn apply(self: *const GameState, action: Action) GameState {
+        var next = self.*;
+        const player: usize = self.current_player;
+        const opponent: usize = 1 - player;
+
+        // Record action in history
+        next.recordAction(action.toChar());
+        next.actions_this_round += 1;
+
+        switch (action) {
+            .check => {
+                std.debug.assert(self.amountToCall() == 0);
+                // Second check ends the round
+                if (self.actions_this_round == 1) {
+                    next.endRound();
+                } else {
+                    next.current_player = @intCast(opponent);
+                }
+            },
+            .bet => {
+                std.debug.assert(self.amountToCall() == 0);
+                std.debug.assert(self.canBetOrRaise());
+                next.pot[player] += self.round.betSize();
+                next.bets_this_round += 1;
+                next.current_player = @intCast(opponent);
+            },
+            .call => {
+                std.debug.assert(self.amountToCall() > 0);
+                next.pot[player] += self.amountToCall();
+                next.endRound();
+            },
+            .raise => {
+                std.debug.assert(self.amountToCall() > 0);
+                std.debug.assert(self.canBetOrRaise());
+                next.pot[player] += self.amountToCall() + self.round.betSize();
+                next.bets_this_round += 1;
+                next.current_player = @intCast(opponent);
+            },
+            .fold => {
+                std.debug.assert(self.amountToCall() > 0);
+                next.folded_player = @intCast(player);
+            },
+        }
+        return next;
+    }
+
+    /// Reveal the board card (transition from preflop to flop betting).
+    pub fn revealBoard(self: *GameState) void {
+        self.board_revealed = true;
+        self.current_player = 0;
+        self.bets_this_round = 0;
+        self.actions_this_round = 0;
+    }
+
+    fn endRound(self: *GameState) void {
+        self.bets_this_round = 0;
+        self.actions_this_round = 0;
+
         if (self.round == .preflop) {
-            if (self.preflop_len < MAX_STREET_HISTORY) {
-                self.preflop_history[self.preflop_len] = c;
+            self.round = .flop;
+            self.board_revealed = false; // Will be revealed by caller
+            self.current_player = 0;
+            self.flop_len = 0;
+        } else {
+            self.round = .showdown;
+        }
+    }
+
+    fn recordAction(self: *GameState, char: u8) void {
+        if (self.round == .preflop) {
+            if (self.preflop_len < MAX_HISTORY_LEN) {
+                self.preflop_history[self.preflop_len] = char;
                 self.preflop_len += 1;
             }
         } else {
-            if (self.flop_len < MAX_STREET_HISTORY) {
-                self.flop_history[self.flop_len] = c;
+            if (self.flop_len < MAX_HISTORY_LEN) {
+                self.flop_history[self.flop_len] = char;
                 self.flop_len += 1;
             }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Payoffs
+    // -------------------------------------------------------------------------
+
+    /// Compute player 0's payoff when someone folds.
+    pub fn foldPayoff(self: *const GameState, folder: u8) f64 {
+        const p0_invested: f64 = @floatFromInt(self.pot[0]);
+        if (folder == 0) {
+            return -p0_invested; // P0 folded, loses their chips
+        } else {
+            const total_pot: f64 = @floatFromInt(self.pot[0] + self.pot[1]);
+            return total_pot - p0_invested; // P0 wins the pot
+        }
+    }
+
+    /// Compute player 0's payoff at showdown.
+    /// Hand ranking: pair with board > high card > low card.
+    pub fn showdownPayoff(self: *const GameState) f64 {
+        std.debug.assert(self.board_revealed);
+
+        const p0_invested: f64 = @floatFromInt(self.pot[0]);
+        const total_pot: f64 = @floatFromInt(self.pot[0] + self.pot[1]);
+
+        const p0_rank = cardRank(self.hole_cards[0]);
+        const p1_rank = cardRank(self.hole_cards[1]);
+        const board_rank = cardRank(self.board_card);
+
+        const p0_paired = (p0_rank == board_rank);
+        const p1_paired = (p1_rank == board_rank);
+
+        // Pair beats no pair; otherwise high card wins
+        const p0_wins = (p0_paired and !p1_paired) or
+            (p0_paired == p1_paired and p0_rank > p1_rank);
+        const p1_wins = (p1_paired and !p0_paired) or
+            (p0_paired == p1_paired and p1_rank > p0_rank);
+
+        if (p0_wins) return total_pot - p0_invested;
+        if (p1_wins) return -p0_invested;
+        return total_pot / 2.0 - p0_invested; // Split pot
+    }
+
+    // -------------------------------------------------------------------------
+    // Information Set Key
+    // -------------------------------------------------------------------------
+
+    /// Build the information set key for a player at this state.
+    /// This captures everything the player knows: their card, the board (if shown),
+    /// and the complete betting history.
+    pub fn infoKey(self: *const GameState, player: u8) InfoKey {
+        const hole_card = self.hole_cards[player];
+        std.debug.assert(hole_card != NO_CARD);
+
+        return .{
+            .player = player,
+            .round = self.round,
+            .hole_rank = cardRank(hole_card),
+            .board_rank_plus1 = if (self.board_revealed) cardRank(self.board_card) + 1 else 0,
+            .preflop_len = self.preflop_len,
+            .preflop_history = self.preflop_history,
+            .flop_len = self.flop_len,
+            .flop_history = self.flop_history,
+        };
+    }
 };
 
+// =============================================================================
+// Information Set Key
+// =============================================================================
+
+/// Everything a player knows at a decision point.
+/// Two game states with the same InfoKey are indistinguishable to that player.
 pub const InfoKey = struct {
     player: u8,
     round: Round,
-    priv_rank: u8,
-    pub_rank_plus1: u8, // 0 = no board yet, else rank+1
+    hole_rank: u8, // Rank of private card (0=J, 1=Q, 2=K)
+    board_rank_plus1: u8, // 0 if board not revealed, else rank+1
     preflop_len: u8,
-    preflop_hist: [MAX_STREET_HISTORY]u8,
+    preflop_history: [MAX_HISTORY_LEN]u8,
     flop_len: u8,
-    flop_hist: [MAX_STREET_HISTORY]u8,
+    flop_history: [MAX_HISTORY_LEN]u8,
 };
 
-pub fn makeInfoKey(state: *const GameState, player: u8) InfoKey {
-    const priv = state.private_cards[@intCast(player)];
-    std.debug.assert(priv != INVALID_CARD);
-    const priv_rank = rank(priv);
-    var pub_rank_plus1: u8 = 0;
-    if (state.public_card) |board| pub_rank_plus1 = rank(board) + 1;
+// =============================================================================
+// Deal Enumeration
+// =============================================================================
 
-    return InfoKey{
-        .player = player,
-        .round = state.round,
-        .priv_rank = priv_rank,
-        .pub_rank_plus1 = pub_rank_plus1,
-        .preflop_len = state.preflop_len,
-        .preflop_hist = state.preflop_history,
-        .flop_len = state.flop_len,
-        .flop_hist = state.flop_history,
-    };
-}
-
-pub fn getAvailableActions(state: *const GameState, actions_out: *[MAX_ACTIONS]Action) usize {
-    const p_idx: usize = @intCast(state.current_player);
-    const opp_idx: usize = 1 - p_idx;
-    const to_call: i32 = state.contrib[opp_idx] - state.contrib[p_idx];
-    std.debug.assert(to_call >= 0);
-
-    var count: usize = 0;
-    if (to_call == 0) {
-        actions_out[count] = .check;
-        count += 1;
-        if (state.bets_in_round < MAX_BETS_PER_ROUND) {
-            actions_out[count] = .bet;
-            count += 1;
-        }
-    } else {
-        actions_out[count] = .call;
-        count += 1;
-        if (state.bets_in_round < MAX_BETS_PER_ROUND) {
-            actions_out[count] = .raise;
-            count += 1;
-        }
-        actions_out[count] = .fold;
-        count += 1;
-    }
-    return count;
-}
-
-pub fn endRound(state: GameState) GameState {
-    var next = state;
-    next.bets_in_round = 0;
-    next.actions_in_round = 0;
-    if (state.round == .preflop) {
-        next.round = .flop;
-        next.public_card = null;
-        next.current_player = 0;
-        next.flop_len = 0;
-    } else if (state.round == .flop) {
-        next.round = .showdown;
-    }
-    return next;
-}
-
-pub fn applyAction(state: *const GameState, action: Action) GameState {
-    var next = state.*;
-    const p_idx: usize = @intCast(state.current_player);
-    const opp_idx: usize = 1 - p_idx;
-    const to_call: i32 = state.contrib[opp_idx] - state.contrib[p_idx];
-    std.debug.assert(to_call >= 0);
-    const bet_size: i32 = BetSizes[@intFromEnum(state.round)];
-
-    switch (action) {
-        .check => {
-            std.debug.assert(to_call == 0);
-            next.appendAction('k');
-            next.actions_in_round += 1;
-            if (state.actions_in_round == 1) next = endRound(next) else next.current_player = @intCast(opp_idx);
-        },
-        .bet => {
-            std.debug.assert(to_call == 0);
-            std.debug.assert(state.bets_in_round < MAX_BETS_PER_ROUND);
-            next.appendAction('b');
-            next.contrib[p_idx] += bet_size;
-            next.bets_in_round += 1;
-            next.actions_in_round += 1;
-            next.current_player = @intCast(opp_idx);
-        },
-        .call => {
-            std.debug.assert(to_call > 0);
-            next.appendAction('c');
-            next.contrib[p_idx] += to_call;
-            next.actions_in_round += 1;
-            next = endRound(next);
-        },
-        .raise => {
-            std.debug.assert(to_call > 0);
-            std.debug.assert(state.bets_in_round < MAX_BETS_PER_ROUND);
-            next.appendAction('r');
-            next.contrib[p_idx] += to_call + bet_size;
-            next.bets_in_round += 1;
-            next.actions_in_round += 1;
-            next.current_player = @intCast(opp_idx);
-        },
-        .fold => {
-            std.debug.assert(to_call > 0);
-            next.appendAction('f');
-            next.actions_in_round += 1;
-            next.folded_player = @intCast(p_idx);
-        },
-    }
-    return next;
-}
-
-/// Reveal the community card and reset per-round counters for flop play.
-pub fn revealBoard(state: *GameState) void {
-    state.public_card = state.community_card;
-    state.current_player = 0;
-    state.bets_in_round = 0;
-    state.actions_in_round = 0;
-}
-
-pub fn terminalFoldUtility0(state: *const GameState, folded_player: u8) f64 {
-    const pot: f64 = @floatFromInt(state.contrib[0] + state.contrib[1]);
-    const c0: f64 = @floatFromInt(state.contrib[0]);
-    return if (folded_player == 0) -c0 else pot - c0;
-}
-
-/// Enumerate all ordered deals (p0 card, p1 card, board), returning a fixed array.
+/// Generate all possible deals (P0 card, P1 card, board card).
+/// Used for full-tree CFR which iterates over every possible deal.
 pub fn allDeals() [TOTAL_DEALS]GameState {
     var deals: [TOTAL_DEALS]GameState = undefined;
-    var idx: usize = 0;
-    for (0..DECK_SIZE) |c0| {
-        for (0..DECK_SIZE) |c1| {
-            if (c1 == c0) continue;
+    var i: usize = 0;
+
+    for (0..DECK_SIZE) |p0| {
+        for (0..DECK_SIZE) |p1| {
+            if (p1 == p0) continue;
             for (0..DECK_SIZE) |board| {
-                if (board == c0 or board == c1) continue;
-                var s = GameState.init();
-                s.private_cards[0] = @intCast(c0);
-                s.private_cards[1] = @intCast(c1);
-                s.community_card = @intCast(board);
-                deals[idx] = s;
-                idx += 1;
+                if (board == p0 or board == p1) continue;
+                deals[i] = GameState.deal(@intCast(p0), @intCast(p1), @intCast(board));
+                i += 1;
             }
         }
     }
     return deals;
-}
-
-pub fn showdownUtility0(state: *const GameState) f64 {
-    std.debug.assert(state.public_card != null);
-    const pot: f64 = @floatFromInt(state.contrib[0] + state.contrib[1]);
-    const c0: f64 = @floatFromInt(state.contrib[0]);
-    const r0 = rank(state.private_cards[0]);
-    const r1 = rank(state.private_cards[1]);
-    const board = rank(state.public_card.?);
-    const p0_pair = r0 == board;
-    const p1_pair = r1 == board;
-    if (p0_pair and !p1_pair) return pot - c0;
-    if (p1_pair and !p0_pair) return -c0;
-    if (r0 > r1) return pot - c0;
-    if (r1 > r0) return -c0;
-    return pot / 2.0 - c0;
 }
