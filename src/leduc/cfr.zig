@@ -81,9 +81,9 @@ pub const InfoSet = struct {
 
     /// Average Strategy: the time-averaged strategy across all iterations.
     ///
-    /// This is what actually converges to Nash equilibrium—not the current
-    /// regret-matched strategy (which can oscillate), but the average of
-    /// all strategies we've played, weighted by how often we reached this state.
+    /// In two-player zero-sum games, this converges to Nash equilibrium—not
+    /// the current regret-matched strategy (which can oscillate), but the
+    /// average of all strategies we've played, weighted by reach probability.
     pub fn averageStrategy(self: *const InfoSet) [game.MAX_ACTIONS]f64 {
         var strategy: [game.MAX_ACTIONS]f64 = undefined;
         var total_weight: f64 = 0;

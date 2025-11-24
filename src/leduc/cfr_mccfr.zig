@@ -4,10 +4,13 @@
 // Monte Carlo CFR trades exactness for speed: instead of traversing the entire
 // game tree, we *sample* trajectories through it.
 //
-// This implementation uses "external sampling" (also called "outcome sampling"):
+// This implementation uses the "external sampling" variant of MCCFR:
 //   - We designate one player as the "updating player" each traversal
 //   - The updating player enumerates all their actions (like vanilla CFR)
 //   - The opponent's actions are *sampled* from their current strategy
+//
+// (Note: "outcome sampling" is a *different* MCCFR variant where even the
+// updating player's actions are sampled, requiring importance weighting.)
 //
 // Why does this work? The regret updates are *unbiased estimators* of the true
 // CFR updates. Over many iterations, they average out to the same thing—just

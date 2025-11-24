@@ -95,7 +95,9 @@ The **average strategy** (not the current strategy!) converges to Nash equilibri
 
 The regret update asks: "If I had *always* played action A at this decision point, how much better would I have done?" This is counterfactual because we're imagining a different history.
 
-We weight by **opponent reach** because that's how often this decision point matters. Our own probability of reaching here doesn't affect the counterfactual — we're asking what happens if we deviate.
+We weight by **opponent × chance reach** (called "counterfactual reach") because that's how often this decision point matters. Our own probability of reaching here doesn't affect the counterfactual — we're asking what happens if we deviate.
+
+In this code, we loop over all possible deals, so chance probability is uniform and factors out. That's why you only see `reach_prob[opponent]` in the regret update.
 
 ---
 
