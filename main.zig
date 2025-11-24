@@ -127,8 +127,9 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
     const base_value = try base.train(base_iters);
 
     std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
-    std.debug.print("Iters      Value      vs Base    Base vs    Exploit\n", .{});
-    std.debug.print("-----      -----      -------    -------    -------\n", .{});
+    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
+        "Iters", "Value", "vs Base", "Base vs", "Exploit",
+    });
 
     for (sweep) |iters| {
         var trainer = Trainer.init(allocator);
@@ -139,7 +140,7 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
         const base_vs = play.headToHead(Trainer, &base, Trainer, &trainer);
         const exploit = try play.exploitability(Trainer, &trainer);
 
-        std.debug.print("{d:>5}      {d:>6.3}     {d:>6.3}     {d:>6.3}    {d:.5}\n", .{
+        std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}\n", .{
             iters, value, vs_base, base_vs, exploit,
         });
     }
