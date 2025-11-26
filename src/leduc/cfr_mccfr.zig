@@ -47,16 +47,7 @@ pub const MCCFRTrainer = struct {
     rng: std.Random.DefaultPrng,
     update_player: u8 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) MCCFRTrainer {
-        return initWithSeed(allocator, null);
-    }
-
-    pub fn initWithSeed(allocator: std.mem.Allocator, fixed_seed: ?u64) MCCFRTrainer {
-        const seed = fixed_seed orelse blk: {
-            var s: u64 = 0;
-            std.crypto.random.bytes(std.mem.asBytes(&s));
-            break :blk s;
-        };
+    pub fn init(allocator: std.mem.Allocator, seed: u64) MCCFRTrainer {
         return .{
             .allocator = allocator,
             .infosets = cfr.InfoMap.init(allocator),
@@ -66,6 +57,10 @@ pub const MCCFRTrainer = struct {
 
     pub fn deinit(self: *MCCFRTrainer) void {
         self.infosets.deinit();
+    }
+
+    pub fn nodeCount(self: *const MCCFRTrainer) usize {
+        return self.infosets.count();
     }
 
     /// Sample an action index from a probability distribution.

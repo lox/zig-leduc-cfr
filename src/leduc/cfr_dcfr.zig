@@ -71,6 +71,10 @@ pub const DCFRTrainer = struct {
         self.infosets.deinit();
     }
 
+    pub fn nodeCount(self: *const DCFRTrainer) usize {
+        return self.infosets.count();
+    }
+
     fn traverse(self: *DCFRTrainer, state: game.GameState, reach_prob: Payoffs) !Payoffs {
         // ===== TERMINAL NODES =====
         if (state.folded_player) |folder| {

@@ -32,12 +32,16 @@ pub const CFRPlusTrainer = struct {
     infosets: cfr.InfoMap,
     update_player: u8 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) CFRPlusTrainer {
+    pub fn init(allocator: std.mem.Allocator, _: void) CFRPlusTrainer {
         return .{ .allocator = allocator, .infosets = cfr.InfoMap.init(allocator) };
     }
 
     pub fn deinit(self: *CFRPlusTrainer) void {
         self.infosets.deinit();
+    }
+
+    pub fn nodeCount(self: *const CFRPlusTrainer) usize {
+        return self.infosets.count();
     }
 
     /// The CFR+ traversal.

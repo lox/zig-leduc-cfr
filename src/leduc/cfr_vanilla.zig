@@ -37,12 +37,16 @@ pub const VanillaCFRTrainer = struct {
     allocator: std.mem.Allocator,
     infosets: cfr.InfoMap,
 
-    pub fn init(allocator: std.mem.Allocator) VanillaCFRTrainer {
+    pub fn init(allocator: std.mem.Allocator, _: void) VanillaCFRTrainer {
         return .{ .allocator = allocator, .infosets = cfr.InfoMap.init(allocator) };
     }
 
     pub fn deinit(self: *VanillaCFRTrainer) void {
         self.infosets.deinit();
+    }
+
+    pub fn nodeCount(self: *const VanillaCFRTrainer) usize {
+        return self.infosets.count();
     }
 
     /// The core CFR recursion. Returns payoff for each player from this state.

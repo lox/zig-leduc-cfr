@@ -36,11 +36,11 @@ pub fn main() !void {
     const sweep = generateSweep(config.max_iters);
 
     switch (config.algo) {
-        .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, sweep.items(), "Vanilla", config.no_self_play, config.threshold_mbb),
-        .mccfr => try runSweepMCCFR(allocator, sweep.items(), config.no_self_play, config.threshold_mbb, config.seed),
-        .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, allocator, sweep.items(), "CFR+", config.no_self_play, config.threshold_mbb),
-        .lcfr => try runSweepDCFR(allocator, sweep.items(), .lcfr, "LCFR", config.no_self_play, config.threshold_mbb),
-        .dcfr => try runSweepDCFR(allocator, sweep.items(), .dcfr, "DCFR", config.no_self_play, config.threshold_mbb),
+        .vanilla => try runSweep(vanilla.VanillaCFRTrainer, void, allocator, {}, sweep.items(), "Vanilla", config.no_self_play, config.threshold_mbb),
+        .mccfr => try runSweep(mccfr.MCCFRTrainer, u64, allocator, resolveSeed(config.seed), sweep.items(), "MCCFR", config.no_self_play, config.threshold_mbb),
+        .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, void, allocator, {}, sweep.items(), "CFR+", config.no_self_play, config.threshold_mbb),
+        .lcfr => try runSweep(dcfr.DCFRTrainer, dcfr.DiscountScheme, allocator, .lcfr, sweep.items(), "LCFR", config.no_self_play, config.threshold_mbb),
+        .dcfr => try runSweep(dcfr.DCFRTrainer, dcfr.DiscountScheme, allocator, .dcfr, sweep.items(), "DCFR", config.no_self_play, config.threshold_mbb),
     }
 }
 
@@ -138,6 +138,14 @@ fn printUsage() void {
     , .{});
 }
 
+fn resolveSeed(fixed_seed: ?u64) u64 {
+    return fixed_seed orelse blk: {
+        var s: u64 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&s));
+        break :blk s;
+    };
+}
+
 /// Generate iteration counts: 100, 300, 1000, 3000, ... up to max_iters.
 /// Pattern: 1, 3, 10, 30, 100, ... (alternating ×3 and ×10/3)
 fn generateSweep(max_iters: usize) Sweep {
@@ -173,86 +181,28 @@ const Sweep = struct {
     }
 };
 
-fn runSweepMCCFR(allocator: std.mem.Allocator, sweep: []const usize, no_self_play: bool, threshold_mbb: f64, fixed_seed: ?u64) !void {
-    const seed = fixed_seed orelse blk: {
-        var s: u64 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&s));
-        break :blk s;
-    };
+fn runSweep(
+    comptime Trainer: type,
+    comptime Ctx: type,
+    allocator: std.mem.Allocator,
+    ctx: Ctx,
+    sweep: []const usize,
+    label: []const u8,
+    no_self_play: bool,
+    threshold_mbb: f64,
+) !void {
+    std.debug.print("Leduc CFR trainer - {s} ({s})\n", .{ label, @tagName(builtin.mode) });
+    std.debug.print("Iterations: {any}\n", .{sweep});
+    if (Ctx == u64) std.debug.print("Seed: {d}\n", .{ctx});
 
-    std.debug.print(
-        \\Leduc CFR trainer - MCCFR ({s})
-        \\Iterations: {any}
-        \\Seed: {d}
-        \\
-    , .{ @tagName(builtin.mode), sweep, seed });
-
-    if (no_self_play) {
-        std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
-
-        var total_timer = std.time.Timer.start() catch unreachable;
-        var total_iters: usize = 0;
-        var exploits: [Sweep.MAX]f64 = undefined;
-        var exploit_count: usize = 0;
-
-        for (sweep) |iters| {
-            var trainer = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
-            defer trainer.deinit();
-
-            const value = try trainer.train(iters);
-            const exploit = try play.exploitability(mccfr.MCCFRTrainer, &trainer);
-            const mbb = exploit * 500.0;
-            total_iters += iters;
-            exploits[exploit_count] = exploit;
-            exploit_count += 1;
-
-            std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
+    const initTrainer = struct {
+        fn init(a: std.mem.Allocator, c: Ctx) Trainer {
+            return Trainer.init(a, c);
         }
-
-        const total_ns = total_timer.read();
-        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
-        const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
-        std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
-
-        try validateMonotonicity(exploits[0..exploit_count], threshold_mbb);
-        return;
-    }
-
-    const base_iters = sweep[sweep.len - 1];
-    var base = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
-    defer base.deinit();
-    const base_value = try base.train(base_iters);
-
-    std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
-    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
-        "Iters", "Value", "vs Base", "Base vs", "Exploit",
-    });
-
-    for (sweep) |iters| {
-        var trainer = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
-        defer trainer.deinit();
-        const value = try trainer.train(iters);
-
-        const vs_base = play.headToHead(mccfr.MCCFRTrainer, &trainer, mccfr.MCCFRTrainer, &base);
-        const base_vs = play.headToHead(mccfr.MCCFRTrainer, &base, mccfr.MCCFRTrainer, &trainer);
-        const exploit = try play.exploitability(mccfr.MCCFRTrainer, &trainer);
-        const mbb = exploit * 500.0;
-
-        std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}  {d:>8.2}\n", .{
-            iters, value, vs_base, base_vs, exploit, mbb,
-        });
-    }
-}
-
-fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr.DiscountScheme, label: []const u8, no_self_play: bool, threshold_mbb: f64) !void {
-    std.debug.print(
-        \\Leduc CFR trainer - {s} ({s})
-        \\Iterations: {any}
-        \\
-    , .{ label, @tagName(builtin.mode), sweep });
+    }.init;
 
     if (no_self_play) {
-        std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
+        std.debug.print("{s:>10}  {s:>6}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Nodes", "Value", "Exploit", "mbb/g" });
 
         var total_timer = std.time.Timer.start() catch unreachable;
         var total_iters: usize = 0;
@@ -260,71 +210,7 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
         var exploit_count: usize = 0;
 
         for (sweep) |iters| {
-            var trainer = dcfr.DCFRTrainer.init(allocator, scheme);
-            defer trainer.deinit();
-
-            const value = try trainer.train(iters);
-            const exploit = try play.exploitability(dcfr.DCFRTrainer, &trainer);
-            const mbb = exploit * 500.0;
-            total_iters += iters;
-            exploits[exploit_count] = exploit;
-            exploit_count += 1;
-
-            std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
-        }
-
-        const total_ns = total_timer.read();
-        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
-        const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
-        std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
-
-        try validateMonotonicity(exploits[0..exploit_count], threshold_mbb);
-        return;
-    }
-
-    const base_iters = sweep[sweep.len - 1];
-    var base = dcfr.DCFRTrainer.init(allocator, scheme);
-    defer base.deinit();
-    const base_value = try base.train(base_iters);
-
-    std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
-    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
-        "Iters", "Value", "vs Base", "Base vs", "Exploit",
-    });
-
-    for (sweep) |iters| {
-        var trainer = dcfr.DCFRTrainer.init(allocator, scheme);
-        defer trainer.deinit();
-        const value = try trainer.train(iters);
-
-        const vs_base = play.headToHead(dcfr.DCFRTrainer, &trainer, dcfr.DCFRTrainer, &base);
-        const base_vs = play.headToHead(dcfr.DCFRTrainer, &base, dcfr.DCFRTrainer, &trainer);
-        const exploit = try play.exploitability(dcfr.DCFRTrainer, &trainer);
-        const mbb = exploit * 500.0;
-
-        std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}  {d:>8.2}\n", .{
-            iters, value, vs_base, base_vs, exploit, mbb,
-        });
-    }
-}
-
-fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const usize, label: []const u8, no_self_play: bool, threshold_mbb: f64) !void {
-    std.debug.print(
-        \\Leduc CFR trainer - {s} ({s})
-        \\Iterations: {any}
-        \\
-    , .{ label, @tagName(builtin.mode), sweep });
-
-    if (no_self_play) {
-        std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
-
-        var total_timer = std.time.Timer.start() catch unreachable;
-        var total_iters: usize = 0;
-        var exploits: [Sweep.MAX]f64 = undefined;
-        var exploit_count: usize = 0;
-
-        for (sweep) |iters| {
-            var trainer = Trainer.init(allocator);
+            var trainer = initTrainer(allocator, ctx);
             defer trainer.deinit();
 
             const value = try trainer.train(iters);
@@ -334,7 +220,7 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
             exploits[exploit_count] = exploit;
             exploit_count += 1;
 
-            std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
+            std.debug.print("{d:>10}  {d:>6}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, trainer.nodeCount(), value, exploit, mbb });
         }
 
         const total_ns = total_timer.read();
@@ -346,26 +232,23 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
         return;
     }
 
-    // Train a "base" strategy at max iterations for comparison
     const base_iters = sweep[sweep.len - 1];
-    var base = Trainer.init(allocator);
+    var base = initTrainer(allocator, ctx);
     defer base.deinit();
     const base_value = try base.train(base_iters);
 
     std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
-    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
-        "Iters", "Value", "vs Base", "Base vs", "Exploit",
-    });
+    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{ "Iters", "Value", "vs Base", "Base vs", "Exploit" });
 
     for (sweep) |iters| {
-        var trainer = Trainer.init(allocator);
+        var trainer = initTrainer(allocator, ctx);
         defer trainer.deinit();
         const value = try trainer.train(iters);
 
         const vs_base = play.headToHead(Trainer, &trainer, Trainer, &base);
         const base_vs = play.headToHead(Trainer, &base, Trainer, &trainer);
         const exploit = try play.exploitability(Trainer, &trainer);
-        const mbb = exploit * 500.0; // 1 bb = 2 chips, so mbb = (exploit / 2) * 1000
+        const mbb = exploit * 500.0;
 
         std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}  {d:>8.2}\n", .{
             iters, value, vs_base, base_vs, exploit, mbb,
@@ -385,7 +268,7 @@ test "runSweep skips base trainer when self-play disabled" {
     const TestTrainer = struct {
         pub var init_calls: usize = 0;
 
-        pub fn init(_: std.mem.Allocator) @This() {
+        pub fn init(_: std.mem.Allocator, _: void) @This() {
             init_calls += 1;
             return .{};
         }
@@ -393,6 +276,10 @@ test "runSweep skips base trainer when self-play disabled" {
         pub fn deinit(_: *@This()) void {}
 
         pub fn train(_: *@This(), _: usize) !f64 {
+            return 0;
+        }
+
+        pub fn nodeCount(_: *const @This()) usize {
             return 0;
         }
 
@@ -407,7 +294,7 @@ test "runSweep skips base trainer when self-play disabled" {
     const sweep = [_]usize{10};
     TestTrainer.init_calls = 0;
 
-    try runSweep(TestTrainer, std.testing.allocator, sweep[0..], "Test", true, 100.0);
+    try runSweep(TestTrainer, void, std.testing.allocator, {}, sweep[0..], "Test", true, 100.0);
 
     try std.testing.expectEqual(@as(usize, sweep.len), TestTrainer.init_calls);
 }
