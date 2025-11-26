@@ -143,8 +143,8 @@ const InfoSetStats = struct {
 };
 
 /// A deterministic policy: maps each info set to a single action index.
-const Policy = std.AutoHashMap(game.InfoKey, u8);
-const StatsMap = std.AutoHashMap(game.InfoKey, InfoSetStats);
+const Policy = std.HashMap(game.InfoKey, u8, game.InfoKey.HashContext, std.hash_map.default_max_load_percentage);
+const StatsMap = std.HashMap(game.InfoKey, InfoSetStats, game.InfoKey.HashContext, std.hash_map.default_max_load_percentage);
 
 /// Compute the expected value of a player's best response against the opponent's strategy.
 fn bestResponseValue(comptime T: type, opponent_strategy: *const T, br_player: u8) !f64 {

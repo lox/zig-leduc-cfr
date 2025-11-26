@@ -342,8 +342,8 @@ pub const GameState = struct {
             .hole_rank = cardRank(hole_card),
             .board_rank_plus1 = if (self.board_revealed) cardRank(self.board_card) + 1 else 0,
             .preflop_len = self.preflop_len,
-            .preflop_history = self.preflop_history,
             .flop_len = self.flop_len,
+            .preflop_history = self.preflop_history,
             .flop_history = self.flop_history,
         };
     }
@@ -358,12 +358,47 @@ pub const GameState = struct {
 pub const InfoKey = struct {
     player: u8,
     round: Round,
-    hole_rank: u8, // Rank of private card (0=J, 1=Q, 2=K)
-    board_rank_plus1: u8, // 0 if board not revealed, else rank+1
+    hole_rank: u8,
+    board_rank_plus1: u8,
     preflop_len: u8,
-    preflop_history: [MAX_HISTORY_LEN]u8,
     flop_len: u8,
+    preflop_history: [MAX_HISTORY_LEN]u8,
     flop_history: [MAX_HISTORY_LEN]u8,
+
+    /// Custom hash context for use with std.HashMap.
+    ///
+    /// We define explicit hash/eql functions rather than relying on AutoHashMap because:
+    ///
+    /// 1. AutoHashMap hashes raw struct bytes, including any padding the compiler
+    ///    may insert between fields. Padding bytes are uninitialized and can contain
+    ///    arbitrary values, causing the same logical key to hash differently across
+    ///    calls — especially in ReleaseFast where memory isn't zero-initialized.
+    ///
+    /// 2. We only hash the meaningful portion of the history arrays (0..len) rather
+    ///    than the full fixed-size arrays, which is both correct and more efficient.
+    ///
+    /// 3. Explicit hashing is self-documenting: it shows exactly which fields
+    ///    contribute to key identity.
+    pub const HashContext = struct {
+        pub fn hash(_: HashContext, key: InfoKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(&.{ key.player, @intFromEnum(key.round), key.hole_rank, key.board_rank_plus1 });
+            h.update(key.preflop_history[0..key.preflop_len]);
+            h.update(key.flop_history[0..key.flop_len]);
+            return h.final();
+        }
+
+        pub fn eql(_: HashContext, a: InfoKey, b: InfoKey) bool {
+            return a.player == b.player and
+                a.round == b.round and
+                a.hole_rank == b.hole_rank and
+                a.board_rank_plus1 == b.board_rank_plus1 and
+                a.preflop_len == b.preflop_len and
+                a.flop_len == b.flop_len and
+                std.mem.eql(u8, a.preflop_history[0..a.preflop_len], b.preflop_history[0..b.preflop_len]) and
+                std.mem.eql(u8, a.flop_history[0..a.flop_len], b.flop_history[0..b.flop_len]);
+        }
+    };
 };
 
 // =============================================================================

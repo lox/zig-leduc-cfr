@@ -101,7 +101,7 @@ pub const InfoSet = struct {
 };
 
 /// Map from information set keys to their stored regrets and strategies.
-pub const InfoMap = std.AutoHashMap(game.InfoKey, InfoSet);
+pub const InfoMap = std.HashMap(game.InfoKey, InfoSet, game.InfoKey.HashContext, std.hash_map.default_max_load_percentage);
 
 /// Look up or create an information set for this key.
 pub fn getOrCreateInfoSet(map: *InfoMap, key: game.InfoKey, actions: []const game.Action) !*InfoSet {
