@@ -13,7 +13,17 @@ jobs:
     strategy:
       matrix:
         optimize: [Debug, ReleaseFast]
-        algo: [vanilla, mccfr, cfr_plus, lcfr, dcfr]
+        include:
+          - algo: vanilla
+            iters: 10000
+          - algo: cfr_plus
+            iters: 10000
+          - algo: lcfr
+            iters: 10000
+          - algo: dcfr
+            iters: 10000
+          - algo: mccfr
+            iters: 100000
 
     steps:
       - uses: actions/checkout@v3
@@ -26,4 +36,4 @@ jobs:
         run: zig build -Doptimize=${{ matrix.optimize }}
 
       - name: Test ${{ matrix.algo }}
-        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=10000 --no-self-play
+        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --no-self-play
