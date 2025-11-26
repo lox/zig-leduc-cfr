@@ -173,16 +173,19 @@ const Sweep = struct {
     }
 };
 
-fn runSweepMCCFR(allocator: std.mem.Allocator, sweep: []const usize, no_self_play: bool, threshold_mbb: f64, seed: ?u64) !void {
+fn runSweepMCCFR(allocator: std.mem.Allocator, sweep: []const usize, no_self_play: bool, threshold_mbb: f64, fixed_seed: ?u64) !void {
+    const seed = fixed_seed orelse blk: {
+        var s: u64 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&s));
+        break :blk s;
+    };
+
     std.debug.print(
         \\Leduc CFR trainer - MCCFR ({s})
         \\Iterations: {any}
+        \\Seed: {d}
         \\
-    , .{ @tagName(builtin.mode), sweep });
-
-    if (seed) |s| {
-        std.debug.print("Seed: {d}\n", .{s});
-    }
+    , .{ @tagName(builtin.mode), sweep, seed });
 
     if (no_self_play) {
         std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
