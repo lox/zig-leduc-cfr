@@ -4,13 +4,17 @@
 // Monte Carlo CFR trades exactness for speed: instead of traversing the entire
 // game tree, we *sample* trajectories through it.
 //
-// This implementation uses the "external sampling" variant of MCCFR:
+// This implementation uses the "external sampling" variant of MCCFR (Lanctot 2009):
 //   - We designate one player as the "updating player" each traversal
 //   - The updating player enumerates all their actions (like vanilla CFR)
 //   - The opponent's actions are *sampled* from their current strategy
 //
-// (Note: "outcome sampling" is a *different* MCCFR variant where even the
-// updating player's actions are sampled, requiring importance weighting.)
+// AVERAGE STRATEGY:
+//   We use textbook reach-weighted averaging. Each time we visit an infoset I
+//   for the updating player, we add:
+//     cumulative_strategy[a] += reach_prob[player] * strategy[a]
+//
+//   The average strategy is then: cumulative_strategy[a] / sum(cumulative_strategy)
 //
 // Why does this work? The regret updates are *unbiased estimators* of the true
 // CFR updates. Over many iterations, they average out to the same thing—just
@@ -25,6 +29,11 @@
 //   - Same regret update formula at updating player's nodes
 //   - NEW: Opponent nodes sample one action instead of enumerating all
 //   - NEW: We alternate which player is "updating" each iteration
+//
+// CONVERGENCE NOTE:
+//   External Sampling MCCFR converges at O(1/sqrt(T)), slower than vanilla CFR's
+//   O(1/T) but with much less work per iteration. For Leduc, vanilla CFR is
+//   typically more efficient due to the small game tree.
 
 const std = @import("std");
 const game = @import("game.zig");
@@ -32,41 +41,19 @@ const cfr = @import("cfr.zig");
 
 const Payoffs = [game.NUM_PLAYERS]f64;
 
-/// Simple LCG random number generator. Good enough for educational Monte Carlo.
-const Rng = struct {
-    state: u64,
-
-    fn init() Rng {
-        var seed: u64 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&seed));
-        return .{ .state = seed | 1 };
-    }
-
-    fn next(self: *Rng) u64 {
-        self.state = self.state *% 6364136223846793005 +% 1;
-        return self.state;
-    }
-
-    fn float(self: *Rng) f64 {
-        return @as(f64, @floatFromInt(self.next() >> 11)) / 9007199254740992.0;
-    }
-
-    fn uintLessThan(self: *Rng, comptime T: type, max: T) T {
-        return @intCast(self.next() % @as(u64, max));
-    }
-};
-
 pub const MCCFRTrainer = struct {
     allocator: std.mem.Allocator,
     infosets: cfr.InfoMap,
-    rng: Rng,
+    rng: std.Random.DefaultPrng,
     update_player: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator) MCCFRTrainer {
+        var seed: u64 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&seed));
         return .{
             .allocator = allocator,
             .infosets = cfr.InfoMap.init(allocator),
-            .rng = Rng.init(),
+            .rng = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -75,8 +62,8 @@ pub const MCCFRTrainer = struct {
     }
 
     /// Sample an action index from a probability distribution.
-    fn sampleAction(rng: *Rng, probs: []const f64) usize {
-        const r = rng.float();
+    fn sampleAction(rng: *std.Random.DefaultPrng, probs: []const f64) usize {
+        const r = rng.random().float(f64);
         var cumulative: f64 = 0;
         for (probs, 0..) |p, i| {
             cumulative += p;
@@ -87,6 +74,8 @@ pub const MCCFRTrainer = struct {
 
     /// The MCCFR traversal. Very similar to vanilla CFR, but opponent nodes
     /// sample a single action instead of enumerating all actions.
+    ///
+    /// `iter`: The current iteration number (1-based), used for gap weighting.
     fn traverse(self: *MCCFRTrainer, state: game.GameState, reach_prob: Payoffs) !Payoffs {
 
         // ===== TERMINAL NODES =====
@@ -108,7 +97,6 @@ pub const MCCFRTrainer = struct {
 
         // ===== DECISION NODE =====
         const player: usize = @intCast(state.current_player);
-        const opponent: usize = 1 - player;
 
         var actions: [game.MAX_ACTIONS]game.Action = undefined;
         const num_actions = state.legalActions(&actions);
@@ -138,14 +126,18 @@ pub const MCCFRTrainer = struct {
                 expected_payoff[1] += strategy[i] * child_payoff[1];
             }
 
-            // Update regrets (same formula as vanilla CFR)
+            // Update regrets - no weighting needed in external sampling since
+            // opponent reach is implicitly 1.0 (we don't update it at sampled nodes)
             const infoset_mut = self.infosets.getPtr(key).?;
             for (0..num_actions) |i| {
                 const regret = action_payoffs[i][player] - expected_payoff[player];
-                infoset_mut.cumulative_regret[i] += reach_prob[opponent] * regret;
+                infoset_mut.cumulative_regret[i] += regret;
             }
 
-            // Update average strategy
+            // TEXTBOOK MCCFR AVERAGING (uniform weights)
+            //
+            // Each time we visit an infoset I for player `player` on an iteration,
+            // we add reach_prob[player] * strategy[i] to cumulative_strategy.
             for (0..num_actions) |i| {
                 infoset_mut.cumulative_strategy[i] += reach_prob[player] * strategy[i];
             }
@@ -153,33 +145,32 @@ pub const MCCFRTrainer = struct {
             return expected_payoff;
         } else {
             // ===== OPPONENT: sample ONE action from their strategy =====
-            // This is the key difference from vanilla CFR!
-            // We don't enumerate—we sample, making the tree traversal O(depth) not O(tree).
+            // Sample opponent actions proportionally to their strategy.
             const action_idx = sampleAction(&self.rng, strategy[0..num_actions]);
             const action = actions[action_idx];
             const child = state.apply(action);
 
-            var child_reach = reach_prob;
-            child_reach[player] *= strategy[action_idx];
+            // NOTE: We do NOT update average strategy here.
+            // The average strategy is updated only by the updating player, using the gap method.
 
-            return self.traverse(child, child_reach);
+            return self.traverse(child, reach_prob);
         }
     }
 
     /// Train for the given number of iterations.
-    /// Each iteration: sample a deal, update player 0, then update player 1.
+    /// Each iteration: sample a deal and update BOTH players.
     pub fn train(self: *MCCFRTrainer, iterations: usize) !f64 {
         const deals = game.allDeals();
         var total_payoff: f64 = 0;
 
         for (0..iterations) |_| {
-            const deal = deals[self.rng.uintLessThan(usize, deals.len)];
+            const deal = deals[self.rng.random().uintLessThan(usize, deals.len)];
 
-            // Update player 0's regrets
+            // Update P0
             self.update_player = 0;
             const payoff = try self.traverse(deal, .{ 1, 1 });
 
-            // Update player 1's regrets (same deal, different perspective)
+            // Update P1
             self.update_player = 1;
             _ = try self.traverse(deal, .{ 1, 1 });
 
@@ -188,7 +179,7 @@ pub const MCCFRTrainer = struct {
 
         return total_payoff / @as(f64, @floatFromInt(iterations));
     }
-
+    
     /// Look up the average (Nash-converging) strategy for an information set.
     ///
     /// This is used during evaluation to see how the trained policy plays.
