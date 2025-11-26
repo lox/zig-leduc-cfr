@@ -85,6 +85,30 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 // Removed parseArgsSlice as we parse directly now
 
 
+fn validateMonotonicity(exploits: []const f64) !void {
+    if (exploits.len < 2) return;
+
+    var violations: usize = 0;
+    for (1..exploits.len) |i| {
+        if (exploits[i] > exploits[i - 1] * 1.1) { // Allow 10% tolerance
+            violations += 1;
+        }
+    }
+
+    // Check final exploitability is reasonable (< 100 mbb/g)
+    const final_exploit = exploits[exploits.len - 1];
+    const final_mbb = final_exploit * 500.0;
+
+    if (violations > exploits.len / 2 or final_mbb > 100.0) {
+        std.debug.print("\nVALIDATION FAILED: exploitability not converging\n", .{});
+        std.debug.print("  Monotonicity violations: {d}/{d}\n", .{ violations, exploits.len - 1 });
+        std.debug.print("  Final exploitability: {d:.2} mbb/g (expected < 100)\n", .{final_mbb});
+        std.process.exit(1);
+    }
+
+    std.debug.print("Validation: OK (final {d:.2} mbb/g)\n", .{final_mbb});
+}
+
 fn printUsage() void {
     std.debug.print(
         \\Usage: leduc-cfr [OPTIONS]
@@ -146,6 +170,8 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
 
         var total_timer = std.time.Timer.start() catch unreachable;
         var total_iters: usize = 0;
+        var exploits: [Sweep.MAX]f64 = undefined;
+        var exploit_count: usize = 0;
 
         for (sweep) |iters| {
             var trainer = dcfr.DCFRTrainer.init(allocator, scheme);
@@ -155,6 +181,8 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
             const exploit = try play.exploitability(dcfr.DCFRTrainer, &trainer);
             const mbb = exploit * 500.0;
             total_iters += iters;
+            exploits[exploit_count] = exploit;
+            exploit_count += 1;
 
             std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
         }
@@ -164,6 +192,7 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
         const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
         std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
 
+        try validateMonotonicity(exploits[0..exploit_count]);
         return;
     }
 
@@ -205,6 +234,8 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
 
         var total_timer = std.time.Timer.start() catch unreachable;
         var total_iters: usize = 0;
+        var exploits: [Sweep.MAX]f64 = undefined;
+        var exploit_count: usize = 0;
 
         for (sweep) |iters| {
             var trainer = Trainer.init(allocator);
@@ -214,6 +245,8 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
             const exploit = try play.exploitability(Trainer, &trainer);
             const mbb = exploit * 500.0;
             total_iters += iters;
+            exploits[exploit_count] = exploit;
+            exploit_count += 1;
 
             std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
         }
@@ -223,6 +256,7 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
         const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
         std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
 
+        try validateMonotonicity(exploits[0..exploit_count]);
         return;
     }
 

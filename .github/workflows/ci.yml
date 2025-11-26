@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        optimize: [Debug, ReleaseFast]
+        algo: [vanilla, mccfr, cfr_plus, lcfr, dcfr]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: cashapp/activate-hermit@v1
+        with:
+          cache: "true"
+
+      - name: Build
+        run: zig build -Doptimize=${{ matrix.optimize }}
+
+      - name: Test ${{ matrix.algo }}
+        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=1000 --no-self-play
