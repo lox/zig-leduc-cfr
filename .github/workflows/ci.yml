@@ -23,7 +23,7 @@ jobs:
           - algo: dcfr
             iters: 10000
           - algo: mccfr
-            iters: 100000
+            iters: 300000
 
     steps:
       - uses: actions/checkout@v3
