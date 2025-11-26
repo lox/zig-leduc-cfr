@@ -26,4 +26,4 @@ jobs:
         run: zig build -Doptimize=${{ matrix.optimize }}
 
       - name: Test ${{ matrix.algo }}
-        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=1000 --no-self-play
+        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=10000 --no-self-play
