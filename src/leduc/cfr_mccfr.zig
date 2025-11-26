@@ -48,8 +48,15 @@ pub const MCCFRTrainer = struct {
     update_player: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator) MCCFRTrainer {
-        var seed: u64 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&seed));
+        return initWithSeed(allocator, null);
+    }
+
+    pub fn initWithSeed(allocator: std.mem.Allocator, fixed_seed: ?u64) MCCFRTrainer {
+        const seed = fixed_seed orelse blk: {
+            var s: u64 = 0;
+            std.crypto.random.bytes(std.mem.asBytes(&s));
+            break :blk s;
+        };
         return .{
             .allocator = allocator,
             .infosets = cfr.InfoMap.init(allocator),

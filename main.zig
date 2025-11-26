@@ -24,6 +24,7 @@ const Config = struct {
     max_iters: usize = 100_000,
     no_self_play: bool = false,
     threshold_mbb: f64 = 100.0,
+    seed: ?u64 = null,
 };
 
 pub fn main() !void {
@@ -36,7 +37,7 @@ pub fn main() !void {
 
     switch (config.algo) {
         .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, sweep.items(), "Vanilla", config.no_self_play, config.threshold_mbb),
-        .mccfr => try runSweep(mccfr.MCCFRTrainer, allocator, sweep.items(), "MCCFR", config.no_self_play, config.threshold_mbb),
+        .mccfr => try runSweepMCCFR(allocator, sweep.items(), config.no_self_play, config.threshold_mbb, config.seed),
         .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, allocator, sweep.items(), "CFR+", config.no_self_play, config.threshold_mbb),
         .lcfr => try runSweepDCFR(allocator, sweep.items(), .lcfr, "LCFR", config.no_self_play, config.threshold_mbb),
         .dcfr => try runSweepDCFR(allocator, sweep.items(), .dcfr, "DCFR", config.no_self_play, config.threshold_mbb),
@@ -74,6 +75,12 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             const value = arg["--threshold=".len..];
             config.threshold_mbb = std.fmt.parseFloat(f64, value) catch {
                 std.debug.print("Invalid --threshold value: {s}\n", .{value});
+                return error.InvalidArgument;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--seed=")) {
+            const value = arg["--seed=".len..];
+            config.seed = std.fmt.parseInt(u64, value, 10) catch {
+                std.debug.print("Invalid --seed value: {s}\n", .{value});
                 return error.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -125,6 +132,7 @@ fn printUsage() void {
         \\  --max-iters=N    Maximum iterations (default: 100000)
         \\  --no-self-play   Skip vs-base evaluations; report exploitability only
         \\  --threshold=N    Max exploitability in mbb/g (default: 100)
+        \\  --seed=N         Fixed RNG seed for MCCFR (default: random)
         \\  --help, -h       Show this help
         \\
     , .{});
@@ -164,6 +172,74 @@ const Sweep = struct {
         return self.data[0..self.len];
     }
 };
+
+fn runSweepMCCFR(allocator: std.mem.Allocator, sweep: []const usize, no_self_play: bool, threshold_mbb: f64, seed: ?u64) !void {
+    std.debug.print(
+        \\Leduc CFR trainer - MCCFR ({s})
+        \\Iterations: {any}
+        \\
+    , .{ @tagName(builtin.mode), sweep });
+
+    if (seed) |s| {
+        std.debug.print("Seed: {d}\n", .{s});
+    }
+
+    if (no_self_play) {
+        std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
+
+        var total_timer = std.time.Timer.start() catch unreachable;
+        var total_iters: usize = 0;
+        var exploits: [Sweep.MAX]f64 = undefined;
+        var exploit_count: usize = 0;
+
+        for (sweep) |iters| {
+            var trainer = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
+            defer trainer.deinit();
+
+            const value = try trainer.train(iters);
+            const exploit = try play.exploitability(mccfr.MCCFRTrainer, &trainer);
+            const mbb = exploit * 500.0;
+            total_iters += iters;
+            exploits[exploit_count] = exploit;
+            exploit_count += 1;
+
+            std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
+        }
+
+        const total_ns = total_timer.read();
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
+        const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
+        std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
+
+        try validateMonotonicity(exploits[0..exploit_count], threshold_mbb);
+        return;
+    }
+
+    const base_iters = sweep[sweep.len - 1];
+    var base = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
+    defer base.deinit();
+    const base_value = try base.train(base_iters);
+
+    std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
+    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
+        "Iters", "Value", "vs Base", "Base vs", "Exploit",
+    });
+
+    for (sweep) |iters| {
+        var trainer = mccfr.MCCFRTrainer.initWithSeed(allocator, seed);
+        defer trainer.deinit();
+        const value = try trainer.train(iters);
+
+        const vs_base = play.headToHead(mccfr.MCCFRTrainer, &trainer, mccfr.MCCFRTrainer, &base);
+        const base_vs = play.headToHead(mccfr.MCCFRTrainer, &base, mccfr.MCCFRTrainer, &trainer);
+        const exploit = try play.exploitability(mccfr.MCCFRTrainer, &trainer);
+        const mbb = exploit * 500.0;
+
+        std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}  {d:>8.2}\n", .{
+            iters, value, vs_base, base_vs, exploit, mbb,
+        });
+    }
+}
 
 fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr.DiscountScheme, label: []const u8, no_self_play: bool, threshold_mbb: f64) !void {
     std.debug.print(

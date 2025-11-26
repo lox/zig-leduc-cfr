@@ -25,6 +25,7 @@ jobs:
           - algo: mccfr
             iters: 300000
             threshold: 200
+            seed: 42
 
     steps:
       - uses: actions/checkout@v3
@@ -37,4 +38,9 @@ jobs:
         run: zig build -Doptimize=${{ matrix.optimize }}
 
       - name: Test ${{ matrix.algo }}
-        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --threshold=${{ matrix.threshold || 100 }} --no-self-play
+        run: |
+          SEED_ARG=""
+          if [ -n "${{ matrix.seed }}" ]; then
+            SEED_ARG="--seed=${{ matrix.seed }}"
+          fi
+          ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --threshold=${{ matrix.threshold || 100 }} $SEED_ARG --no-self-play
