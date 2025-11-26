@@ -10,13 +10,14 @@
 //   ./bin/zig build run -Doptimize=ReleaseFast -- --algo=mccfr --max-iters=50000
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vanilla = @import("src/leduc/cfr_vanilla.zig");
-const vanilla_iter = @import("src/leduc/cfr_vanilla_iter.zig");
 const mccfr = @import("src/leduc/cfr_mccfr.zig");
 const cfr_plus = @import("src/leduc/cfr_plus.zig");
+const dcfr = @import("src/leduc/cfr_dcfr.zig");
 const play = @import("src/leduc/play.zig");
 
-const Algorithm = enum { vanilla, vanilla_iter, mccfr, cfr_plus };
+const Algorithm = enum { vanilla, mccfr, cfr_plus, lcfr, dcfr };
 
 const Config = struct {
     algo: Algorithm = .vanilla,
@@ -34,9 +35,10 @@ pub fn main() !void {
 
     switch (config.algo) {
         .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, sweep.items(), "Vanilla", config.no_self_play),
-        .vanilla_iter => try runSweep(vanilla_iter.VanillaIterativeTrainer, allocator, sweep.items(), "Vanilla (Iterative)", config.no_self_play),
         .mccfr => try runSweep(mccfr.MCCFRTrainer, allocator, sweep.items(), "MCCFR", config.no_self_play),
         .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, allocator, sweep.items(), "CFR+", config.no_self_play),
+        .lcfr => try runSweepDCFR(allocator, sweep.items(), .lcfr, "LCFR", config.no_self_play),
+        .dcfr => try runSweepDCFR(allocator, sweep.items(), .dcfr, "DCFR", config.no_self_play),
     }
 }
 
@@ -51,12 +53,14 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--algo=vanilla")) {
             config.algo = .vanilla;
-        } else if (std.mem.eql(u8, arg, "--algo=vanilla_iter")) {
-            config.algo = .vanilla_iter;
         } else if (std.mem.eql(u8, arg, "--algo=mccfr")) {
             config.algo = .mccfr;
         } else if (std.mem.eql(u8, arg, "--algo=cfr_plus")) {
             config.algo = .cfr_plus;
+        } else if (std.mem.eql(u8, arg, "--algo=lcfr")) {
+            config.algo = .lcfr;
+        } else if (std.mem.eql(u8, arg, "--algo=dcfr")) {
+            config.algo = .dcfr;
         } else if (std.mem.startsWith(u8, arg, "--max-iters=")) {
             const value = arg["--max-iters=".len..];
             config.max_iters = std.fmt.parseInt(usize, value, 10) catch {
@@ -86,10 +90,11 @@ fn printUsage() void {
         \\Usage: leduc-cfr [OPTIONS]
         \\
         \\Options:
-        \\  --algo=vanilla|vanilla_iter|mccfr|cfr_plus  CFR variant (default: vanilla)
-        \\  --max-iters=N                               Maximum iterations (default: 100000)
-        \\  --no-self-play                              Skip vs-base evaluations; report exploitability only
-        \\  --help, -h                                  Show this help
+        \\  --algo=ALGO      CFR variant (default: vanilla)
+        \\                   vanilla, mccfr, cfr_plus, lcfr, dcfr
+        \\  --max-iters=N    Maximum iterations (default: 100000)
+        \\  --no-self-play   Skip vs-base evaluations; report exploitability only
+        \\  --help, -h       Show this help
         \\
     , .{});
 }
@@ -129,15 +134,77 @@ const Sweep = struct {
     }
 };
 
-fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const usize, label: []const u8, no_self_play: bool) !void {
+fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr.DiscountScheme, label: []const u8, no_self_play: bool) !void {
     std.debug.print(
-        \\Leduc CFR trainer - {s}
+        \\Leduc CFR trainer - {s} ({s})
         \\Iterations: {any}
         \\
-    , .{ label, sweep });
+    , .{ label, @tagName(builtin.mode), sweep });
 
     if (no_self_play) {
         std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
+
+        var total_timer = std.time.Timer.start() catch unreachable;
+        var total_iters: usize = 0;
+
+        for (sweep) |iters| {
+            var trainer = dcfr.DCFRTrainer.init(allocator, scheme);
+            defer trainer.deinit();
+
+            const value = try trainer.train(iters);
+            const exploit = try play.exploitability(dcfr.DCFRTrainer, &trainer);
+            const mbb = exploit * 500.0;
+            total_iters += iters;
+
+            std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
+        }
+
+        const total_ns = total_timer.read();
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
+        const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
+        std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
+
+        return;
+    }
+
+    const base_iters = sweep[sweep.len - 1];
+    var base = dcfr.DCFRTrainer.init(allocator, scheme);
+    defer base.deinit();
+    const base_value = try base.train(base_iters);
+
+    std.debug.print("\nBase ({d} iters) game value: {d:.5}\n\n", .{ base_iters, base_value });
+    std.debug.print("{s:>10}  {s:>8}  {s:>8}  {s:>8}  {s:>8}\n", .{
+        "Iters", "Value", "vs Base", "Base vs", "Exploit",
+    });
+
+    for (sweep) |iters| {
+        var trainer = dcfr.DCFRTrainer.init(allocator, scheme);
+        defer trainer.deinit();
+        const value = try trainer.train(iters);
+
+        const vs_base = play.headToHead(dcfr.DCFRTrainer, &trainer, dcfr.DCFRTrainer, &base);
+        const base_vs = play.headToHead(dcfr.DCFRTrainer, &base, dcfr.DCFRTrainer, &trainer);
+        const exploit = try play.exploitability(dcfr.DCFRTrainer, &trainer);
+        const mbb = exploit * 500.0;
+
+        std.debug.print("{d:>10}  {d:>8.4}  {d:>8.4}  {d:>8.4}  {d:>8.5}  {d:>8.2}\n", .{
+            iters, value, vs_base, base_vs, exploit, mbb,
+        });
+    }
+}
+
+fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const usize, label: []const u8, no_self_play: bool) !void {
+    std.debug.print(
+        \\Leduc CFR trainer - {s} ({s})
+        \\Iterations: {any}
+        \\
+    , .{ label, @tagName(builtin.mode), sweep });
+
+    if (no_self_play) {
+        std.debug.print("{s:>10}  {s:>8}  {s:>10}  {s:>8}\n", .{ "Iters", "Value", "Exploit", "mbb/g" });
+
+        var total_timer = std.time.Timer.start() catch unreachable;
+        var total_iters: usize = 0;
 
         for (sweep) |iters| {
             var trainer = Trainer.init(allocator);
@@ -146,9 +213,15 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
             const value = try trainer.train(iters);
             const exploit = try play.exploitability(Trainer, &trainer);
             const mbb = exploit * 500.0;
+            total_iters += iters;
 
             std.debug.print("{d:>10}  {d:>8.4}  {d:>10.5}  {d:>8.2}\n", .{ iters, value, exploit, mbb });
         }
+
+        const total_ns = total_timer.read();
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
+        const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
+        std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
 
         return;
     }
