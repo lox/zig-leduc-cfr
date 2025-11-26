@@ -23,6 +23,7 @@ const Config = struct {
     algo: Algorithm = .vanilla,
     max_iters: usize = 100_000,
     no_self_play: bool = false,
+    threshold_mbb: f64 = 100.0,
 };
 
 pub fn main() !void {
@@ -34,11 +35,11 @@ pub fn main() !void {
     const sweep = generateSweep(config.max_iters);
 
     switch (config.algo) {
-        .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, sweep.items(), "Vanilla", config.no_self_play),
-        .mccfr => try runSweep(mccfr.MCCFRTrainer, allocator, sweep.items(), "MCCFR", config.no_self_play),
-        .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, allocator, sweep.items(), "CFR+", config.no_self_play),
-        .lcfr => try runSweepDCFR(allocator, sweep.items(), .lcfr, "LCFR", config.no_self_play),
-        .dcfr => try runSweepDCFR(allocator, sweep.items(), .dcfr, "DCFR", config.no_self_play),
+        .vanilla => try runSweep(vanilla.VanillaCFRTrainer, allocator, sweep.items(), "Vanilla", config.no_self_play, config.threshold_mbb),
+        .mccfr => try runSweep(mccfr.MCCFRTrainer, allocator, sweep.items(), "MCCFR", config.no_self_play, config.threshold_mbb),
+        .cfr_plus => try runSweep(cfr_plus.CFRPlusTrainer, allocator, sweep.items(), "CFR+", config.no_self_play, config.threshold_mbb),
+        .lcfr => try runSweepDCFR(allocator, sweep.items(), .lcfr, "LCFR", config.no_self_play, config.threshold_mbb),
+        .dcfr => try runSweepDCFR(allocator, sweep.items(), .dcfr, "DCFR", config.no_self_play, config.threshold_mbb),
     }
 }
 
@@ -69,6 +70,12 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             };
         } else if (std.mem.eql(u8, arg, "--no-self-play")) {
             config.no_self_play = true;
+        } else if (std.mem.startsWith(u8, arg, "--threshold=")) {
+            const value = arg["--threshold=".len..];
+            config.threshold_mbb = std.fmt.parseFloat(f64, value) catch {
+                std.debug.print("Invalid --threshold value: {s}\n", .{value});
+                return error.InvalidArgument;
+            };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             std.process.exit(0);
@@ -85,7 +92,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 // Removed parseArgsSlice as we parse directly now
 
 
-fn validateMonotonicity(exploits: []const f64) !void {
+fn validateMonotonicity(exploits: []const f64, threshold_mbb: f64) !void {
     if (exploits.len < 2) return;
 
     var violations: usize = 0;
@@ -95,18 +102,17 @@ fn validateMonotonicity(exploits: []const f64) !void {
         }
     }
 
-    // Check final exploitability is reasonable (< 100 mbb/g)
     const final_exploit = exploits[exploits.len - 1];
     const final_mbb = final_exploit * 500.0;
 
-    if (violations > exploits.len / 2 or final_mbb > 100.0) {
+    if (violations > exploits.len / 2 or final_mbb > threshold_mbb) {
         std.debug.print("\nVALIDATION FAILED: exploitability not converging\n", .{});
         std.debug.print("  Monotonicity violations: {d}/{d}\n", .{ violations, exploits.len - 1 });
-        std.debug.print("  Final exploitability: {d:.2} mbb/g (expected < 100)\n", .{final_mbb});
+        std.debug.print("  Final exploitability: {d:.2} mbb/g (threshold: {d:.0})\n", .{ final_mbb, threshold_mbb });
         std.process.exit(1);
     }
 
-    std.debug.print("Validation: OK (final {d:.2} mbb/g)\n", .{final_mbb});
+    std.debug.print("Validation: OK (final {d:.2} mbb/g, threshold: {d:.0})\n", .{ final_mbb, threshold_mbb });
 }
 
 fn printUsage() void {
@@ -118,6 +124,7 @@ fn printUsage() void {
         \\                   vanilla, mccfr, cfr_plus, lcfr, dcfr
         \\  --max-iters=N    Maximum iterations (default: 100000)
         \\  --no-self-play   Skip vs-base evaluations; report exploitability only
+        \\  --threshold=N    Max exploitability in mbb/g (default: 100)
         \\  --help, -h       Show this help
         \\
     , .{});
@@ -158,7 +165,7 @@ const Sweep = struct {
     }
 };
 
-fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr.DiscountScheme, label: []const u8, no_self_play: bool) !void {
+fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr.DiscountScheme, label: []const u8, no_self_play: bool, threshold_mbb: f64) !void {
     std.debug.print(
         \\Leduc CFR trainer - {s} ({s})
         \\Iterations: {any}
@@ -192,7 +199,7 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
         const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
         std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
 
-        try validateMonotonicity(exploits[0..exploit_count]);
+        try validateMonotonicity(exploits[0..exploit_count], threshold_mbb);
         return;
     }
 
@@ -222,7 +229,7 @@ fn runSweepDCFR(allocator: std.mem.Allocator, sweep: []const usize, scheme: dcfr
     }
 }
 
-fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const usize, label: []const u8, no_self_play: bool) !void {
+fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const usize, label: []const u8, no_self_play: bool, threshold_mbb: f64) !void {
     std.debug.print(
         \\Leduc CFR trainer - {s} ({s})
         \\Iterations: {any}
@@ -256,7 +263,7 @@ fn runSweep(comptime Trainer: type, allocator: std.mem.Allocator, sweep: []const
         const us_per_iter = @as(f64, @floatFromInt(total_ns)) / 1_000.0 / @as(f64, @floatFromInt(total_iters));
         std.debug.print("\nTotal: {d:.1}ms ({d} iters, {d:.2} us/iter)\n", .{ total_ms, total_iters, us_per_iter });
 
-        try validateMonotonicity(exploits[0..exploit_count]);
+        try validateMonotonicity(exploits[0..exploit_count], threshold_mbb);
         return;
     }
 
@@ -321,7 +328,7 @@ test "runSweep skips base trainer when self-play disabled" {
     const sweep = [_]usize{10};
     TestTrainer.init_calls = 0;
 
-    try runSweep(TestTrainer, std.testing.allocator, sweep[0..], "Test", true);
+    try runSweep(TestTrainer, std.testing.allocator, sweep[0..], "Test", true, 100.0);
 
     try std.testing.expectEqual(@as(usize, sweep.len), TestTrainer.init_calls);
 }

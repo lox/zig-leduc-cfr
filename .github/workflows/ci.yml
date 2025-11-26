@@ -24,6 +24,7 @@ jobs:
             iters: 10000
           - algo: mccfr
             iters: 300000
+            threshold: 200
 
     steps:
       - uses: actions/checkout@v3
@@ -36,4 +37,4 @@ jobs:
         run: zig build -Doptimize=${{ matrix.optimize }}
 
       - name: Test ${{ matrix.algo }}
-        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --no-self-play
+        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --threshold=${{ matrix.threshold || 100 }} --no-self-play
