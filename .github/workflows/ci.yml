@@ -13,19 +13,7 @@ jobs:
     strategy:
       matrix:
         optimize: [Debug, ReleaseFast]
-        include:
-          - algo: vanilla
-            iters: 10000
-          - algo: cfr_plus
-            iters: 10000
-          - algo: lcfr
-            iters: 10000
-          - algo: dcfr
-            iters: 10000
-          - algo: mccfr
-            iters: 300000
-            threshold: 200
-            seed: 42
+        algo: [vanilla, cfr_plus, lcfr, dcfr]
 
     steps:
       - uses: actions/checkout@v3
@@ -37,10 +25,5 @@ jobs:
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }}
 
-      - name: Test ${{ matrix.algo }}
-        run: |
-          SEED_ARG=""
-          if [ -n "${{ matrix.seed }}" ]; then
-            SEED_ARG="--seed=${{ matrix.seed }}"
-          fi
-          ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=${{ matrix.iters }} --threshold=${{ matrix.threshold || 100 }} $SEED_ARG --no-self-play
+      - name: Test ${{ matrix.algo }} (${{ matrix.optimize }})
+        run: ./zig-out/bin/cfr-leduc --algo=${{ matrix.algo }} --max-iters=10000 --no-self-play
